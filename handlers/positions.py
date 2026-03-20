@@ -54,59 +54,72 @@ async def show_positions(msg: Message, uid: int):
         return
 
     sol_price = get_cached_sol_price()
-    lines     = []
-    total_pnl = 0.0
 
-    for pos in positions:
-        data  = await fetch_price(pos.contract)
-        cur_x = pnl_sol = pnl_pct = 0.0
-        mcap_str = "?"
+    # Разделяем на manual и auto
+    manual_pos = [p for p in positions if p.source == "manual"]
+    auto_pos   = [p for p in positions if p.source != "manual"]
 
-        if data and data.get("price") and pos.entry_price:
-            cur_x            = data["price"] / pos.entry_price
-            pnl_sol, pnl_pct = calc_pnl(pos.sol_in, cur_x)
-            mcap_str         = fmt_mcap(data["mcap"])
-            total_pnl       += pnl_sol
+    async def build_section(pos_list: list, title: str) -> tuple[str, float]:
+        if not pos_list:
+            return "", 0.0
+        lines     = [f"*{title}*"]
+        total_pnl = 0.0
+        for pos in pos_list:
+            data  = await fetch_price(pos.contract)
+            cur_x = pnl_sol = pnl_pct = 0.0
+            mcap_str = "?"
+            if data and data.get("price") and pos.entry_price:
+                cur_x            = data["price"] / pos.entry_price
+                pnl_sol, pnl_pct = calc_pnl(pos.sol_in, cur_x)
+                mcap_str         = fmt_mcap(data["mcap"])
+                total_pnl       += pnl_sol
+            sign  = "+" if pnl_sol >= 0 else ""
+            emoji = "🟢" if cur_x >= 1 else "🔴"
+            plan  = json.loads(pos.exit_plan) if pos.exit_plan else []
+            next_tp = next((l for l in plan
+                            if not l.get("done") and not l.get("skipped") and l.get("x")), None)
+            tp_str = f"  📌 {next_tp['label']} → {next_tp['pct']}%" if next_tp else ""
+            sl_str = f"  🛑{fmt_mcap(pos.stop_loss)}" if pos.stop_loss else ""
+            lines.append(
+                f"{emoji} *${pos.symbol}*  {fmt_x(cur_x)}"
+                f"  {sign}{fmt_sol(pnl_sol, 3)} ({sign}{fmt_pct(pnl_pct)})\n"
+                f"  In: {fmt_sol(pos.sol_in, 2)}  Mcap: {mcap_str}{sl_str}{tp_str}"
+            )
+        return "\n".join(lines), total_pnl
 
-        sign  = "+" if pnl_sol >= 0 else ""
-        emoji = "🟢" if cur_x >= 1 else "🔴"
-        plan  = json.loads(pos.exit_plan) if pos.exit_plan else []
-        next_tp = next((l for l in plan if not l.get("done") and not l.get("skipped") and l.get("x")), None)
-        tp_str  = f"\n  📌 Next TP: {next_tp['label']} → sell {next_tp['pct']}%" if next_tp else ""
-        sl_str  = f"  🛑 SL: {fmt_mcap(pos.stop_loss)}" if pos.stop_loss else ""
+    manual_text, manual_pnl = await build_section(manual_pos, "✋ Manual")
+    auto_text,   auto_pnl   = await build_section(auto_pos,   "🤖 Auto-tracked")
 
-        lines.append(
-            f"{emoji} *${pos.symbol}*  {fmt_x(cur_x)}"
-            f"  *{sign}{fmt_sol(pnl_sol, 3)}* ({sign}{fmt_pct(pnl_pct)})\n"
-            f"  In: {fmt_sol(pos.sol_in, 2)}  Mcap: {mcap_str}"
-            f"  {sl_str}{tp_str}"
-        )
-
+    total_pnl = manual_pnl + auto_pnl
     sign_t    = "+" if total_pnl >= 0 else ""
     usd_total = f" (≈${total_pnl * sol_price:.0f})" if sol_price else ""
-    header    = (
+
+    header = (
         f"📊 *Positions* ({len(positions)}) · "
         f"PnL: *{sign_t}{fmt_sol(total_pnl, 3)}*{usd_total}\n"
         f"━━━━━━━━━━━━━━━━\n\n"
     )
 
-    # Кнопки управления — по строке на каждую позицию
+    sections = [s for s in [manual_text, auto_text] if s]
+    text = header + "\n\n".join(sections)
+
+    # Кнопки управления
     buttons = []
     for pos in positions[:6]:
+        icon = "✋" if pos.source == "manual" else "🤖"
         buttons.append([
-            InlineKeyboardButton(f"${pos.symbol} ✎ Plan", callback_data=f"editplan:{pos.id}"),
-            InlineKeyboardButton("💸 Sell",                callback_data=f"closepos:{pos.id}"),
-            InlineKeyboardButton("🛑",                     callback_data=f"setsl:{pos.id}"),
+            InlineKeyboardButton(f"{icon} ${pos.symbol} ✎", callback_data=f"editplan:{pos.id}"),
+            InlineKeyboardButton("💸 Sell",                  callback_data=f"closepos:{pos.id}"),
+            InlineKeyboardButton("🛑 SL",                    callback_data=f"setsl:{pos.id}"),
         ])
     buttons.append([
-        InlineKeyboardButton("➕ Add", callback_data="do:add"),
-        InlineKeyboardButton("📸 Snap", callback_data="snapshot:refresh"),
-        InlineKeyboardButton("◀️ Menu", callback_data="do:menu"),
+        InlineKeyboardButton("➕ Add",   callback_data="do:add"),
+        InlineKeyboardButton("📸 Snap",  callback_data="snapshot:refresh"),
+        InlineKeyboardButton("◀️ Menu",  callback_data="do:menu"),
     ])
 
     await msg.reply_text(
-        header + "\n\n".join(lines),
-        parse_mode="Markdown",
+        text, parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(buttons),
         disable_web_page_preview=True
     )
@@ -530,6 +543,20 @@ async def closepos_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pos = await s.get(Position, pos_id)
 
     if not pos or pos.user_id != q.from_user.id:
+        await q.answer("Position not found", show_alert=True)
+        return ConversationHandler.END
+
+    if pos.status != "active":
+        await q.answer("Position already closed", show_alert=True)
+        await q.message.reply_text(
+            f"ℹ️ *${pos.symbol}* is already closed.\n\n"
+            f"Check your journal for the trade record.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📓 Journal", callback_data="do:journal"),
+                InlineKeyboardButton("◀️ Menu",    callback_data="do:menu"),
+            ]])
+        )
         return ConversationHandler.END
 
     ctx.user_data["close_pos_id"] = pos_id

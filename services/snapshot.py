@@ -35,7 +35,7 @@ async def generate_snapshot(user_id: int) -> bytes | None:
 
     sol_price = get_cached_sol_price() or 0
 
-    # Live PnL по открытым позициям
+    # Live PnL по открытым позициям (с разделением manual/auto)
     live_positions = []
     live_pnl = 0.0
     for pos in positions:
@@ -49,6 +49,7 @@ async def generate_snapshot(user_id: int) -> bytes | None:
                 "x":      round(cur_x,  2),
                 "pnl":    round(pnl_sol, 3),
                 "pct":    round(pnl_pct, 1),
+                "source": pos.source or "manual",
             })
 
     # Журнал статистика
@@ -62,6 +63,11 @@ async def generate_snapshot(user_id: int) -> bytes | None:
         [j.exit_x for j in journal] + [p["x"] for p in live_positions],
         default=0
     )
+    # Раздельная статистика
+    manual_j     = [j for j in journal if "Auto" not in (j.note or "")]
+    auto_j       = [j for j in journal if "Auto" in (j.note or "") or "auto" in (j.note or "")]
+    manual_wr    = (sum(1 for j in manual_j if j.pnl_sol >= 0) / len(manual_j) * 100) if manual_j else 0
+    auto_wr      = (sum(1 for j in auto_j   if j.pnl_sol >= 0) / len(auto_j)   * 100) if auto_j   else 0
 
     # ── Рисуем ───────────────────────────────────────────────────────────────
     W, H   = 800, 460
@@ -126,10 +132,10 @@ async def generate_snapshot(user_id: int) -> bytes | None:
 
     # Стат карточки
     stats = [
-        ("WINRATE", f"{winrate:.0f}%",   GREEN if winrate >= 50 else RED),
-        ("TRADES",  str(total_trades),    CYAN),
-        ("BEST X",  fmt_x(best_x),        GREEN if best_x > 1 else MUTED),
-        ("OPEN",    str(len(positions)),   WHITE),
+        ("WINRATE",   f"{winrate:.0f}%",    GREEN if winrate >= 50 else RED),
+        ("✋ MANUAL", f"{manual_wr:.0f}%",  GREEN if manual_wr >= 50 else (RED if manual_j else MUTED)),
+        ("🤖 AUTO",  f"{auto_wr:.0f}%",    GREEN if auto_wr >= 50 else (RED if auto_j else MUTED)),
+        ("BEST X",   fmt_x(best_x),         GREEN if best_x > 1 else MUTED),
     ]
     card_w = (W - 56) // 4
     for i, (label, val, col) in enumerate(stats):
@@ -145,7 +151,8 @@ async def generate_snapshot(user_id: int) -> bytes | None:
         for p in sorted(live_positions, key=lambda x: x["x"], reverse=True)[:5]:
             col   = GREEN if p["pnl"] >= 0 else RED
             sign_p = "+" if p["pnl"] >= 0 else ""
-            row   = f"${p['symbol']:<10} {p['x']:.2f}x    {sign_p}{p['pnl']:.3f} SOL   ({sign_p}{p['pct']:.1f}%)"
+            src_icon = "🤖" if p.get("source") != "manual" else "✋"
+            row   = f"{src_icon} ${p['symbol']:<8} {p['x']:.2f}x  {sign_p}{p['pnl']:.3f} SOL ({sign_p}{p['pct']:.1f}%)"
             draw.text((28, y), row, font=font_mono, fill=col)
             y += 22
             if y > H - 50:
