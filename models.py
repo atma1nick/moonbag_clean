@@ -17,8 +17,9 @@ class User(Base):
     currency   = Column(String(4),   default="SOL")
     whale_min  = Column(Float,       default=5.0)
     is_pro     = Column(Boolean,     default=False)
-    pro_until  = Column(DateTime,    nullable=True)
-    created_at = Column(DateTime,    default=datetime.utcnow)
+    pro_until    = Column(DateTime,    nullable=True)
+    default_plan = Column(Text,        nullable=True)   # JSON — дефолтный план выхода
+    created_at   = Column(DateTime,    default=datetime.utcnow)
 
 
 class Position(Base):

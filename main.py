@@ -23,6 +23,8 @@ from handlers.smartwallets import sw_cb, sw_input
 from handlers.kols         import kol_cb, kol_input
 from handlers.settings     import settings_cb, settings_input
 from handlers.admin        import cmd_admin, cmd_grant_pro, cmd_broadcast
+from handlers.autoplan     import (cmd_autoplan, autoplan_cb,
+                                   autoplan_got_text, ST_AUTOPLAN)
 
 import loops.price_loop  as price_loop
 import loops.wallet_loop as wallet_loop
@@ -203,16 +205,25 @@ def main():
         allow_reentry=True,
     )
 
+    autoplan_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(autoplan_cb, pattern=r"^ap:")],
+        states={ST_AUTOPLAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, autoplan_got_text)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        allow_reentry=True,
+    )
+
     # Commands
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("menu",      cmd_menu))
     app.add_handler(CommandHandler("help",      cmd_help))
     app.add_handler(CommandHandler("cancel",    cmd_cancel))
+    app.add_handler(CommandHandler("autoplan",  cmd_autoplan))
     app.add_handler(CommandHandler("admin",     cmd_admin))
     app.add_handler(CommandHandler("grant_pro", cmd_grant_pro))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
 
     # Conversations — BEFORE generic callbacks
+    app.add_handler(autoplan_conv)
     app.add_handler(add_conv)
     app.add_handler(quickadd_conv)
     app.add_handler(edit_plan_conv)

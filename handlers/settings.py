@@ -35,7 +35,8 @@ async def show_settings(msg: Message, uid: int):
              InlineKeyboardButton("💱 Currency",        callback_data="cfg:currency")],
             [InlineKeyboardButton("🐳 Whale Threshold", callback_data="cfg:whale"),
              InlineKeyboardButton("🤖 Track Mode",      callback_data="cfg:mode")],
-            [InlineKeyboardButton("🌐 Language",        callback_data="cfg:lang")],
+            [InlineKeyboardButton("📋 Auto Exit Plan",  callback_data="cfg:autoplan"),
+             InlineKeyboardButton("🌐 Language",        callback_data="cfg:lang")],
             [InlineKeyboardButton("◀️ Menu",            callback_data="do:menu")],
         ])
     )
@@ -129,6 +130,16 @@ async def settings_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )],
                 [InlineKeyboardButton("◀️ Back", callback_data="do:settings")],
             ])
+        )
+
+    elif action == "autoplan":
+        # Редирект на /autoplan
+        await q.message.reply_text(
+            "Use /autoplan to set your default exit plan.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📋 Set Auto Plan", callback_data="ap:custom"),
+                InlineKeyboardButton("◀️ Back", callback_data="do:settings"),
+            ]])
         )
 
     elif action == "setmode":
