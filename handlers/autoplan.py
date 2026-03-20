@@ -74,6 +74,37 @@ async def autoplan_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     action = q.data.split(":")[1]
     uid    = q.from_user.id
 
+    if action == "menu":
+        await cmd_autoplan.__wrapped__(update, ctx) if hasattr(cmd_autoplan, '__wrapped__') else None
+        # Показываем меню autoplan заново
+        from handlers.base import get_user
+        import json
+        user = await get_user(uid)
+        if user and user.default_plan:
+            try:
+                plan = json.loads(user.default_plan)
+                from utils import exit_plan_text
+                current = exit_plan_text(plan)
+            except Exception:
+                current = "_default (4x 50%, 8x 30%, moon 20%)_"
+        else:
+            current = "_default (4x 50%, 8x 30%, moon 20%)_"
+        await q.message.reply_text(
+            f"📋 *Auto-Track Exit Plan*\n\n"
+            f"*Current:*\n{current}\n\n"
+            f"Choose preset or send custom:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Conservative", callback_data="ap:conservative"),
+                 InlineKeyboardButton("🚀 Aggressive",   callback_data="ap:aggressive")],
+                [InlineKeyboardButton("🌙 Moonbag",      callback_data="ap:moonbag"),
+                 InlineKeyboardButton("✎ Custom",        callback_data="ap:custom")],
+                [InlineKeyboardButton("🔄 Reset default",callback_data="ap:reset")],
+                [InlineKeyboardButton("◀️ Back",         callback_data="do:settings")],
+            ])
+        )
+        return
+
     if action == "custom":
         await q.message.reply_text(
             "✎ *Custom Auto Plan*\n\n"
