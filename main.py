@@ -89,32 +89,6 @@ async def quickadd_cb(update, ctx):
 # ── /help ─────────────────────────────────────────────────────────────────────
 
 async def cmd_help(update, ctx):
-    await update.message.reply_text(
-        "🌙 *MoonBag Bot — Help*\n\n"
-        "*Commands:*\n"
-        "/start — main menu\n"
-        "/menu — main menu\n"
-        "/help — this message\n"
-        "/cancel — cancel current action\n\n"
-        "*How to use:*\n"
-        "1. Tap ➕ Add Position → enter CA\n"
-        "2. Set entry price and SOL amount\n"
-        "3. Set exit plan (take-profits)\n"
-        "4. Bot alerts you when targets hit\n\n"
-        "*Smart Wallets:*\n"
-        "Add whale wallets → get alerted when they buy.\n"
-        "3+ wallets same token in 1h = 🚨 Bundle Signal\n\n"
-        "*Settings:*\n"
-        "Connect wallet → enable Auto mode for on-chain tracking.\n"
-        "Toggle SOL/USD display in Settings.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardMarkup, InlineKeyboardButton("◀️ Menu", callback_data="do:menu")
-        ]])
-    )
-
-
-async def cmd_help(update, ctx):
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
     await update.message.reply_text(
         "🌙 *MoonBag Bot — Help*\n\n"
@@ -275,10 +249,6 @@ def main():
     app.add_handler(CommandHandler("admin",     cmd_admin))
     app.add_handler(CommandHandler("grant_pro", cmd_grant_pro))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
-
-    # Global /cancel — registered BEFORE conversations so it always works
-    # Even if user is stuck in a conversation, /cancel from command list works
-    app.add_handler(CommandHandler("cancel", cmd_cancel), group=0)
 
     # Conversations — BEFORE generic callbacks
     app.add_handler(sw_conv)
