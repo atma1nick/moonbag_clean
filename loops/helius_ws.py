@@ -1,13 +1,13 @@
 """
-Helius WebSocket — мгновенные алерты вместо polling каждые 90s.
-Подключается к Helius Geyser Enhanced WebSocket.
-При разрыве — авто-реконнект, fallback на wallet_loop polling.
+Helius WebSocket — мгновенный трекинг личного кошелька юзера.
+Только для personal wallet (mode=wallet).
+Смарт-кошельки — через wallet_loop polling.
 
-Как работает:
-  1. При старте подписываемся на все tracked кошельки
-  2. Helius пушит транзакцию в реальном времени (< 1s)
-  3. Парсим → вызываем ту же логику что и wallet_loop
-  4. Каждые 5 минут проверяем новые кошельки → досписываемся
+Ключевые улучшения парсинга:
+- Проверяем что ПЕРВЫЙ signer == tracked wallet (не роутер Jupiter)
+- Фильтруем dust transfers (< MIN_SOL_THRESHOLD)
+- Дедупликация по sig
+- Отличаем покупку от продажи по направлению токен-трансфера
 """
 import asyncio
 import json
@@ -15,366 +15,343 @@ import logging
 import os
 from sqlalchemy import select
 from database import async_session
-from models import User, SmartWallet
+from models import User, Position, SeenTx, JournalEntry
 
 log = logging.getLogger(__name__)
 
-HELIUS_KEY    = os.getenv("HELIUS_KEY", "")
-# Helius WebSocket — два возможных эндпоинта
-# atlas-mainnet (Enhanced) требует платный план
-# Используем стандартный который работает на free tier
-WS_URL        = f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
-SOL_MINT      = "So11111111111111111111111111111111111111112"
-RECONNECT_SEC = 5
-MAX_RECONNECTS= 999
+HELIUS_KEY        = os.getenv("HELIUS_KEY", "")
+WS_URL            = f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
+SOL_MINT          = "So11111111111111111111111111111111111111112"
+MIN_SOL_THRESHOLD = 0.001   # меньше этого — игнорируем (dust/fee)
+RECONNECT_SEC     = 5
+MAX_RECONNECTS    = 999
+
+# Известные адреса роутеров — их транзакции не трекаем как "наши"
+KNOWN_ROUTERS = {
+    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",   # Jupiter v6
+    "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB",    # Jupiter v4
+    "6m2CDdhRgxpH4WjvdzxAYbGxwdGUz5MkiiL5SzsKVKAv",  # Raydium
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium AMM
+    "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",  # Orca
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",   # Orca Whirlpool
+}
 
 
-class SubscriptionManager:
-    """Хранит маппинг wallet → subscription_id."""
+class SubManager:
     def __init__(self):
-        self.ws               = None
-        self.subs: dict       = {}     # wallet → sub_id
-        self.pending: dict    = {}     # req_id → wallet
-        self._req_id          = 0
+        self.ws      = None
+        self.subs    = {}   # wallet → sub_id
+        self.pending = {}   # req_id → wallet
+        self._rid    = 0
 
-    def next_id(self) -> int:
-        self._req_id += 1
-        return self._req_id
+    def next_id(self):
+        self._rid += 1
+        return self._rid
 
     async def subscribe(self, wallet: str):
         if not self.ws or wallet in self.subs:
             return
-        req_id = self.next_id()
-        self.pending[req_id] = wallet
-        msg = {
-            "jsonrpc": "2.0",
-            "id":      req_id,
-            "method":  "transactionSubscribe",
-            "params": [
-                {
-                    "vote":           False,
-                    "failed":         False,
-                    "accountInclude": [wallet],
-                },
-                {
-                    "commitment":                     "confirmed",
-                    "encoding":                       "jsonParsed",
-                    "transactionDetails":             "full",
-                    "maxSupportedTransactionVersion": 0,
-                }
-            ]
-        }
+        rid = self.next_id()
+        self.pending[rid] = wallet
         try:
-            await self.ws.send(json.dumps(msg))
+            await self.ws.send(json.dumps({
+                "jsonrpc": "2.0", "id": rid,
+                "method":  "transactionSubscribe",
+                "params":  [
+                    {"vote": False, "failed": False, "accountInclude": [wallet]},
+                    {"commitment": "confirmed", "encoding": "jsonParsed",
+                     "transactionDetails": "full",
+                     "maxSupportedTransactionVersion": 0}
+                ]
+            }))
         except Exception as e:
             log.warning(f"ws subscribe {wallet[:8]}: {e}")
-            self.pending.pop(req_id, None)
+            self.pending.pop(rid, None)
 
-    async def unsubscribe_all(self):
+    async def clear(self):
         self.subs.clear()
         self.pending.clear()
 
 
-_mgr = SubscriptionManager()
+_mgr = SubManager()
 
 
-async def _load_wallets() -> list[str]:
-    """Все кошельки которые нужно отслеживать."""
-    wallets = set()
+async def _get_personal_wallets() -> dict[str, int]:
+    """wallet_address → user_id для всех юзеров с mode=wallet."""
     async with async_session() as s:
-        # Личные кошельки (авто-трекинг)
         users = (await s.execute(
             select(User).where(User.mode == "wallet", User.wallet.isnot(None))
         )).scalars().all()
-        for u in users:
-            if u.wallet:
-                wallets.add(u.wallet)
-
-        # Смарт-кошельки
-        sws = (await s.execute(select(SmartWallet))).scalars().all()
-        for sw in sws:
-            wallets.add(sw.address)
-
-    return list(wallets)
+    return {u.wallet: u.user_id for u in users if u.wallet}
 
 
-async def _process_tx(tx_data: dict, bot):
-    """Парсим транзакцию и вызываем логику wallet_loop."""
+async def _process_tx(tx_data: dict, wallet_map: dict[str, int], bot):
     try:
-        # Определяем адрес кошелька из account keys
-        msg_accounts = (tx_data.get("transaction", {})
-                               .get("message", {})
-                               .get("accountKeys", []))
-        if not msg_accounts:
+        sig = tx_data.get("signature", "")
+        if not sig:
             return
 
-        # Первый signer = инициатор транзакции
-        wallet = None
-        for ak in msg_accounts:
+        # Дедупликация
+        async with async_session() as s:
+            if await s.get(SeenTx, sig):
+                return
+            try:
+                s.add(SeenTx(sig=sig))
+                await s.commit()
+            except Exception:
+                pass
+
+        # Получаем account keys
+        msg      = tx_data.get("transaction", {}).get("message", {})
+        acc_keys = msg.get("accountKeys", [])
+
+        if not acc_keys:
+            return
+
+        # Первый signer = инициатор
+        initiator = None
+        for ak in acc_keys:
             key    = ak if isinstance(ak, str) else ak.get("pubkey", "")
             signer = True if isinstance(ak, str) else ak.get("signer", False)
             if key and signer:
-                wallet = key
+                initiator = key
                 break
 
-        if not wallet:
+        if not initiator:
             return
 
-        # Проверяем: это наш tracked кошелёк?
-        async with async_session() as s:
-            user_result = (await s.execute(
-                select(User).where(User.wallet == wallet, User.mode == "wallet")
-            )).scalars().first()
-
-            sw_result = (await s.execute(
-                select(SmartWallet).where(SmartWallet.address == wallet)
-            )).scalars().all()
-
-        if not user_result and not sw_result:
+        # Проверяем что инициатор — наш tracked wallet, не роутер
+        if initiator not in wallet_map:
+            return
+        if initiator in KNOWN_ROUTERS:
             return
 
-        # Передаём в wallet_loop для обработки
-        # Формируем упрощённый tx объект совместимый с парсерами
-        meta = tx_data.get("meta", {})
-        simplified_tx = {
-            "signature":      tx_data.get("signature", ""),
-            "tokenTransfers": _extract_token_transfers(tx_data),
-            "nativeTransfers": _extract_native_transfers(tx_data, meta),
-        }
+        user_id = wallet_map[initiator]
+        meta    = tx_data.get("meta", {})
 
-        from loops.wallet_loop import (
-            _tx_seen, _mark_seen, _bought_mint, _sold_mint,
-            _sol_spent, _sol_received,
-        )
+        # Парсим токен-трансферы
+        pre_tok  = {b["accountIndex"]: b for b in meta.get("preTokenBalances",  [])}
+        post_tok = {b["accountIndex"]: b for b in meta.get("postTokenBalances", [])}
 
-        sig = simplified_tx["signature"]
-        if not sig or await _tx_seen(sig):
-            return
-        await _mark_seen(sig)
+        # Ищем изменение баланса токена у нашего кошелька
+        # Находим index нашего кошелька
+        our_indices = set()
+        for i, ak in enumerate(acc_keys):
+            key = ak if isinstance(ak, str) else ak.get("pubkey", "")
+            if key == initiator:
+                our_indices.add(i)
 
-        # Личный кошелёк
-        if user_result:
-            from loops.wallet_loop import _process_personal_wallet
-            # Делаем временный объект user с одной транзакцией
-            # (переиспользуем логику напрямую)
-            mint    = _bought_mint(simplified_tx, wallet)
-            is_sell = False
-            if not mint:
-                mint    = _sold_mint(simplified_tx, wallet)
-                is_sell = True
+        bought_mint = None
+        sold_mint   = None
+        sol_change  = 0.0
 
-            if mint:
-                from services.price import fetch_price, get_cached_sol_price
-                data = await fetch_price(mint)
-                if data:
-                    sol = (_sol_spent(simplified_tx, wallet) if not is_sell
-                           else _sol_received(simplified_tx, wallet))
-                    sol_price = get_cached_sol_price()
-                    currency  = user_result.currency or "SOL"
+        # SOL изменение (preBalances - postBalances для нашего кошелька)
+        pre_bals  = meta.get("preBalances",  [])
+        post_bals = meta.get("postBalances", [])
+        for idx in our_indices:
+            if idx < len(pre_bals) and idx < len(post_bals):
+                sol_change += (pre_bals[idx] - post_bals[idx]) / 1e9
 
-                    if not is_sell:
-                        from sqlalchemy import select as sel
-                        from models import Position
-                        async with async_session() as s:
-                            existing = (await s.execute(
-                                sel(Position).where(
-                                    Position.user_id  == user_result.user_id,
-                                    Position.contract == mint,
-                                    Position.status   == "active"
-                                )
-                            )).scalars().first()
+        # Токен-изменения
+        all_indices = set(list(pre_tok.keys()) + list(post_tok.keys()))
+        for idx in all_indices:
+            pre  = pre_tok.get(idx,  {})
+            post = post_tok.get(idx, {})
 
-                        if existing:
-                            from loops.wallet_loop import _send_dca_alert
-                            await _send_dca_alert(bot, user_result, mint, data,
-                                                  sol, currency, sol_price)
-                        else:
-                            from loops.wallet_loop import _get_user_plan
-                            import json as _json
-                            from models import Position as Pos
-                            plan = _get_user_plan(user_result)
-                            async with async_session() as s:
-                                pos = Pos(
-                                    user_id     = user_result.user_id,
-                                    contract    = mint,
-                                    symbol      = data["symbol"],
-                                    name        = data["name"],
-                                    entry_price = data["price"],
-                                    entry_mcap  = data["mcap"],
-                                    sol_in      = sol or 0.5,
-                                    exit_plan   = _json.dumps(plan),
-                                    source      = "wallet",
-                                    status      = "active",
-                                )
-                                s.add(pos)
-                                await s.commit()
-                                await s.refresh(pos)
-                                pos_id = pos.id
-
-                            from loops.wallet_loop import _send_buy_alert
-                            await _send_buy_alert(bot, user_result, pos_id, mint,
-                                                  data, sol, plan, currency, sol_price)
-                    else:
-                        from loops.wallet_loop import _handle_wallet_sell
-                        await _handle_wallet_sell(bot, user_result, mint, data,
-                                                  sol, currency, sol_price)
-
-        # Смарт-кошельки
-        for sw in sw_result:
-            mint = _bought_mint(simplified_tx, wallet)
-            if not mint:
+            # Проверяем что этот токен-аккаунт принадлежит нашему кошельку
+            owner = post.get("owner", pre.get("owner", ""))
+            if owner != initiator:
                 continue
-            sol = _sol_spent(simplified_tx, wallet)
 
-            from models import SmartWalletTx
-            async with async_session() as s:
-                try:
-                    s.add(SmartWalletTx(
-                        user_id    = sw.user_id,
-                        address    = sw.address,
-                        contract   = mint,
-                        label      = sw.label,
-                        action     = "buy",
-                        sol_amount = sol,
-                        tx_sig     = sig,
-                    ))
-                    await s.commit()
-                except Exception:
-                    pass
+            mint     = post.get("mint", pre.get("mint", ""))
+            if not mint or mint == SOL_MINT:
+                continue
 
-            # Bundle check запускаем асинхронно
-            asyncio.create_task(_bundle_check(bot, sw.user_id, mint))
+            pre_amt  = int(pre.get("uiTokenAmount",  {}).get("amount", "0") or "0")
+            post_amt = int(post.get("uiTokenAmount", {}).get("amount", "0") or "0")
 
-        log.debug(f"ws tx processed: {wallet[:8]} sig={sig[:12]}")
+            if post_amt > pre_amt:
+                bought_mint = mint
+            elif post_amt < pre_amt:
+                sold_mint = mint
+
+        # Игнорируем dust
+        if abs(sol_change) < MIN_SOL_THRESHOLD:
+            return
+
+        # ── ПОКУПКА ──────────────────────────────────────────────────────────
+        if bought_mint and sol_change > 0:
+            sol_spent = sol_change
+            await _handle_buy(bot, user_id, bought_mint, sol_spent, sig)
+
+        # ── ПРОДАЖА ──────────────────────────────────────────────────────────
+        elif sold_mint and sol_change < 0:
+            sol_received = abs(sol_change)
+            await _handle_sell(bot, user_id, sold_mint, sol_received)
 
     except Exception as e:
         log.error(f"ws _process_tx: {e}", exc_info=True)
 
 
-async def _bundle_check(bot, user_id: int, mint: str):
-    """Быстрый bundle check после каждой смарт-покупки."""
-    from datetime import datetime, timedelta
-    from loops.wallet_loop import _was_alerted, _mark_alerted
-    from services.price import fetch_price
-    from utils import fmt_mcap, dexscreener
-    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-    from loops.wallet_loop import BUNDLE_THRESHOLD, BUNDLE_WINDOW
+async def _handle_buy(bot, user_id: int, mint: str, sol_spent: float, sig: str):
+    from services.price import fetch_price, get_cached_sol_price
+    from utils import fmt_mcap, fmt_sol, fmt_usd, dexscreener
+    import json as _json
 
-    cutoff = datetime.utcnow() - timedelta(minutes=BUNDLE_WINDOW)
+    # Проверяем нет ли уже позиции
     async with async_session() as s:
-        from models import SmartWalletTx
-        result = await s.execute(
-            select(SmartWalletTx).where(
-                SmartWalletTx.user_id  == user_id,
-                SmartWalletTx.contract == mint,
-                SmartWalletTx.action   == "buy",
-                SmartWalletTx.seen_at  >= cutoff,
+        existing = (await s.execute(
+            select(Position).where(
+                Position.user_id  == user_id,
+                Position.contract == mint,
+                Position.status   == "active"
             )
-        )
-        recent = result.scalars().all()
+        )).scalars().first()
 
-    unique = list({r.address: r for r in recent}.values())
-    if len(unique) < BUNDLE_THRESHOLD:
+    data = await fetch_price(mint)
+    if not data:
+        log.warning(f"ws buy: price not found for {mint[:8]}")
         return
 
-    key = f"bundle:{user_id}:{mint}"
-    if await _was_alerted(key):
-        return
-    await _mark_alerted(user_id, key)
+    sol_price = get_cached_sol_price()
+    usd_str   = f" (≈{fmt_usd(sol_spent * sol_price)})" if sol_price else ""
 
-    data   = await fetch_price(mint)
-    mcap   = fmt_mcap(data["mcap"]) if data else "?"
-    symbol = data["symbol"] if data else "???"
-    name   = data["name"] if data else mint[:8]
-    liq    = fmt_mcap(data["liquidity"]) if data else "?"
-
-    lines = "\n".join(
-        f"  🧠 {w.label or w.address[:8]+'...'} — {w.sol_amount:.2f} SOL"
-        for w in unique[:5]
-    )
-    try:
+    if existing:
+        # DCA — уже есть позиция
         await bot.send_message(
             user_id,
-            f"🚨 *BUNDLE — {name}* (${symbol})\n\n"
-            f"*{len(unique)} wallets* in {BUNDLE_WINDOW}min!\n\n"
-            f"📊 Mcap: {mcap}  |  Liq: {liq}\n"
-            f"`{mint}`\n\n{lines}\n\n"
-            f"[Chart]({dexscreener(mint)})",
+            f"➕ *DCA — ${data['symbol']}*\n\n"
+            f"Added to existing position.\n"
+            f"Amount: *{fmt_sol(sol_spent)}*{usd_str}\n"
+            f"Current mcap: *{fmt_mcap(data['mcap'])}*\n\n"
+            f"_Update position manually if needed._",
             parse_mode="Markdown",
-            disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("➕ Add Position", callback_data=f"quickadd:{mint}"),
-                InlineKeyboardButton("📈 Chart",        url=dexscreener(mint)),
+                InlineKeyboardButton("📊 View position", callback_data="do:pos"),
             ]])
         )
-    except Exception as e:
-        log.error(f"bundle send: {e}")
+        log.info(f"ws DCA: {data['symbol']} → user {user_id}")
+        return
+
+    # Новая позиция
+    async with async_session() as s:
+        user = await s.get(User, user_id)
+    plan = _get_user_plan(user) if user else DEFAULT_PLAN
+
+    async with async_session() as s:
+        pos = Position(
+            user_id     = user_id,
+            contract    = mint,
+            symbol      = data["symbol"],
+            name        = data["name"],
+            entry_price = data["price"],
+            entry_mcap  = data["mcap"],
+            sol_in      = sol_spent,
+            exit_plan   = _json.dumps(plan),
+            source      = "wallet",
+            status      = "active",
+        )
+        s.add(pos)
+        await s.commit()
+        await s.refresh(pos)
+        pos_id = pos.id
+
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+    # Превью плана
+    plan_preview = ""
+    for l in plan:
+        x = l.get("x", 0)
+        pct = l.get("pct", 0)
+        if x and sol_spent:
+            val = sol_spent * (pct / 100) * x
+            plan_preview += f"  • {l.get('label', f'{x}x')} → {pct}% ≈ {fmt_sol(val, 2)}\n"
+        elif not x:
+            plan_preview += f"  • 🌙 Hold {pct}%\n"
+
+    await bot.send_message(
+        user_id,
+        f"🤖 *AUTO-TRACKED — ${data['symbol']}*\n\n"
+        f"📛 {data['name']}\n"
+        f"💰 {fmt_sol(sol_spent)}{usd_str}\n"
+        f"📊 Entry mcap: *{fmt_mcap(data['mcap'])}*\n"
+        f"💧 Liq: {fmt_mcap(data['liquidity'])}\n\n"
+        f"📋 *Exit plan:*\n{plan_preview}\n"
+        f"[DexScreener]({dexscreener(mint)})",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✎ Edit Plan",  callback_data=f"editplan:{pos_id}"),
+            InlineKeyboardButton("✅ Keep Plan", callback_data=f"keepplan:{pos_id}"),
+        ]])
+    )
+    log.info(f"ws buy: {data['symbol']} {sol_spent:.3f} SOL → user {user_id}")
 
 
-def _extract_token_transfers(tx_data: dict) -> list:
-    meta = tx_data.get("meta", {})
-    transfers = []
-    pre  = {b["accountIndex"]: b for b in meta.get("preTokenBalances",  [])}
-    post = {b["accountIndex"]: b for b in meta.get("postTokenBalances", [])}
+async def _handle_sell(bot, user_id: int, mint: str, sol_received: float):
+    from services.price import fetch_price, get_cached_sol_price
+    from utils import fmt_sol, fmt_x, fmt_usd
 
-    # Смотрим все аккаунты в message
-    account_keys = (tx_data.get("transaction", {})
-                           .get("message", {})
-                           .get("accountKeys", []))
+    async with async_session() as s:
+        pos = (await s.execute(
+            select(Position).where(
+                Position.user_id  == user_id,
+                Position.contract == mint,
+                Position.status   == "active"
+            )
+        )).scalars().first()
 
-    for idx, post_bal in post.items():
-        mint      = post_bal.get("mint", "")
-        pre_bal   = pre.get(idx, {})
-        pre_amt   = int(pre_bal.get("uiTokenAmount", {}).get("amount", "0") or "0")
-        post_amt  = int(post_bal.get("uiTokenAmount", {}).get("amount", "0") or "0")
-        owner     = post_bal.get("owner", "")
+    if not pos:
+        return  # нет позиции — игнорируем
 
-        if not mint or mint == SOL_MINT:
-            continue
+    data    = await fetch_price(mint)
+    cur_x   = data["price"] / pos.entry_price if data and pos.entry_price else 0
+    pnl_sol = sol_received - pos.sol_in
+    sign    = "+" if pnl_sol >= 0 else ""
+    emoji   = "🟢" if pnl_sol >= 0 else "🔴"
 
-        if post_amt > pre_amt:
-            transfers.append({
-                "mint":            mint,
-                "toUserAccount":   owner,
-                "fromUserAccount": "",
-                "amount":          post_amt - pre_amt,
-            })
-        elif post_amt < pre_amt:
-            transfers.append({
-                "mint":             mint,
-                "fromUserAccount":  owner,
-                "toUserAccount":    "",
-                "amount":           pre_amt - post_amt,
-            })
-
-    return transfers
-
-
-def _extract_native_transfers(tx_data: dict, meta: dict) -> list:
-    pre_bals  = meta.get("preBalances",  [])
-    post_bals = meta.get("postBalances", [])
-    account_keys = (tx_data.get("transaction", {})
-                           .get("message", {})
-                           .get("accountKeys", []))
-    transfers = []
-    for i, (pre, post) in enumerate(zip(pre_bals, post_bals)):
-        if i >= len(account_keys):
-            break
-        ak   = account_keys[i]
-        addr = ak if isinstance(ak, str) else ak.get("pubkey", "")
-        diff = pre - post
-        if diff > 0:
-            transfers.append({"fromUserAccount": addr, "toUserAccount": "", "amount": diff})
-        elif diff < 0:
-            transfers.append({"fromUserAccount": "", "toUserAccount": addr, "amount": -diff})
-    return transfers
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    await bot.send_message(
+        user_id,
+        f"{emoji} *SELL DETECTED — ${pos.symbol}*\n\n"
+        f"Received: *{fmt_sol(sol_received)}*\n"
+        f"Exit: *{fmt_x(cur_x)}*\n"
+        f"PnL: *{sign}{fmt_sol(pnl_sol)}*\n\n"
+        f"_Tap Close to log to journal._",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔒 Close position", callback_data=f"closepos:{pos.id}"),
+        ]])
+    )
+    log.info(f"ws sell: {pos.symbol} → user {user_id}")
 
 
-# ── Main WebSocket loop ───────────────────────────────────────────────────────
+def _get_user_plan(user) -> list:
+    DEFAULT = [
+        {"x": 4, "pct": 50, "label": "4x"},
+        {"x": 8, "pct": 30, "label": "8x"},
+        {"x": 0, "pct": 20, "label": "moon"},
+    ]
+    if user and user.default_plan:
+        try:
+            return json.loads(user.default_plan)
+        except Exception:
+            pass
+    return DEFAULT
+
+
+DEFAULT_PLAN = [
+    {"x": 4, "pct": 50, "label": "4x"},
+    {"x": 8, "pct": 30, "label": "8x"},
+    {"x": 0, "pct": 20, "label": "moon"},
+]
+
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
 
 async def run(bot):
     if not HELIUS_KEY:
-        log.warning("helius_ws: HELIUS_KEY not set — WebSocket disabled, using polling fallback")
+        log.warning("helius_ws: no HELIUS_KEY — disabled")
         return
 
     try:
@@ -383,67 +360,58 @@ async def run(bot):
         log.warning("helius_ws: websockets not installed")
         return
 
-    log.info("helius_ws: starting real-time listener ⚡")
+    log.info("helius_ws: starting ⚡")
     reconnects = 0
 
     while reconnects < MAX_RECONNECTS:
         try:
             async with websockets.connect(
                 WS_URL,
-                ping_interval = 20,
-                ping_timeout  = 30,
-                close_timeout = 10,
-                max_size      = 10 * 1024 * 1024,
+                ping_interval=20, ping_timeout=30,
+                close_timeout=10, max_size=10*1024*1024,
             ) as ws:
-                _mgr.ws = ws
+                _mgr.ws    = ws
                 reconnects = 0
                 log.info("helius_ws: connected ✅")
 
-                # Подписываемся на все кошельки
-                wallets = await _load_wallets()
-                for w in wallets:
+                # Подписываемся на личные кошельки
+                wallet_map = await _get_personal_wallets()
+                for w in wallet_map:
                     await _mgr.subscribe(w)
-                log.info(f"helius_ws: subscribed to {len(wallets)} wallets")
+                log.info(f"helius_ws: watching {len(wallet_map)} personal wallets")
 
-                # Задача пересинхронизации — подписываемся на новые кошельки
+                # Ресинк каждые 5 минут
                 async def resync():
                     while True:
-                        await asyncio.sleep(300)  # каждые 5 минут
-                        try:
-                            current = await _load_wallets()
-                            new     = [w for w in current if w not in _mgr.subs]
-                            for w in new:
+                        await asyncio.sleep(300)
+                        wmap = await _get_personal_wallets()
+                        for w in wmap:
+                            if w not in _mgr.subs:
                                 await _mgr.subscribe(w)
-                            if new:
-                                log.info(f"helius_ws: subscribed {len(new)} new wallets")
-                        except Exception as e:
-                            log.warning(f"helius_ws resync: {e}")
-
+                                log.info(f"helius_ws: subscribed new wallet {w[:8]}")
                 asyncio.create_task(resync())
 
-                # Основной receive loop
                 async for raw in ws:
                     try:
-                        msg = json.loads(raw)
-
+                        msg    = json.loads(raw)
                         # Подтверждение подписки
                         if "result" in msg and "id" in msg:
-                            req_id = msg["id"]
-                            if req_id in _mgr.pending:
-                                wallet = _mgr.pending.pop(req_id)
-                                _mgr.subs[wallet] = msg["result"]
+                            rid = msg["id"]
+                            if rid in _mgr.pending:
+                                w = _mgr.pending.pop(rid)
+                                _mgr.subs[w] = msg["result"]
                             continue
 
-                        # Транзакция
                         params = msg.get("params", {})
                         if not params:
                             continue
-
                         result = params.get("result", {})
                         value  = result.get("value", result) if isinstance(result, dict) else result
 
                         if isinstance(value, dict) and "transaction" in value:
-                            asyncio.create_task(_process_tx(value, bot))
+                            # Получаем актуальный wallet_map для каждой транзакции
+                            wmap = await _get_personal_wallets()
+                            asyncio.create_task(_process_tx(value, wmap, bot))
 
                     except json.JSONDecodeError:
                         pass
@@ -453,7 +421,7 @@ async def run(bot):
         except Exception as e:
             reconnects += 1
             _mgr.ws = None
-            await _mgr.unsubscribe_all()
+            await _mgr.clear()
             delay = min(RECONNECT_SEC * reconnects, 60)
             log.warning(f"helius_ws: disconnected ({e}), retry {reconnects} in {delay}s")
             await asyncio.sleep(delay)
