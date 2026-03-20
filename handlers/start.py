@@ -41,20 +41,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Язык ещё не выбран
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🇬🇧 English", callback_data="lang:en"),
-        InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
-    ]])
     await update.message.reply_text(
         "🌙 *Welcome to MoonBag Bot!*\n\n"
-        "Your trading assistant for Solana meme coins.\n"
-        "• Track positions & take-profit alerts\n"
-        "• Smart wallet monitoring\n"
-        "• Bundle detector\n"
-        "• Trade journal\n\n"
+        "Trading assistant for Solana meme coins.\n\n"
         "_Choose language / Выберите язык:_",
-        parse_mode="Markdown", reply_markup=kb
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🇬🇧 English", callback_data="lang:en"),
+            InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
+        ]])
     )
 
 
@@ -73,16 +68,17 @@ async def lang_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             user.lang = lang
         await s.commit()
 
-    # Убираем кнопки выбора языка
+    lbl = "🇬🇧 English" if lang == "en" else "🇷🇺 Русский"
     try:
-        lbl = "🇬🇧 English" if lang == "en" else "🇷🇺 Русский"
-        await q.edit_message_text(f"✅ Language: {lbl}", parse_mode="Markdown")
+        await q.edit_message_text(f"✅ Language: {lbl}")
     except Exception:
         pass
 
-    # Показываем главное меню новым сообщением
-    await q.message.chat.send_message(
-        MENU_TEXT[lang], parse_mode="Markdown",
+    # FIX: новым сообщением через bot, не через q.message.chat
+    await ctx.bot.send_message(
+        chat_id=q.message.chat_id,
+        text=MENU_TEXT[lang],
+        parse_mode="Markdown",
         reply_markup=_menu_kb(lang)
     )
 
@@ -111,29 +107,29 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 MENU_TEXT[lang], parse_mode="Markdown",
                 reply_markup=_menu_kb(lang)
             )
+
         elif action == "pos":
             from handlers.positions import show_positions
             await show_positions(q.message, uid)
+
         elif action == "journal":
             from handlers.journal import show_journal
             await show_journal(q.message, uid)
+
         elif action == "smartwallets":
             from handlers.smartwallets import show_smartwallets
             await show_smartwallets(q.message, uid)
+
         elif action == "kols":
             from handlers.kols import show_kols
             await show_kols(q.message, uid)
-        elif action == "add":
-            from handlers.positions import start_add_position
-            await start_add_position(q, ctx)
+
+        # FIX: "add" УБРАН из menu_cb — ConversationHandler перехватывает do:add сам
+
         elif action == "settings":
             from handlers.settings import show_settings
             await show_settings(q.message, uid)
+
     except Exception as e:
         import logging
-        logging.getLogger(__name__).error(f"menu_cb {action}: {e}")
-
-
-def back_button(lang: str = "en") -> InlineKeyboardButton:
-    lbl = "◀️ Back to menu" if lang == "en" else "◀️ Главное меню"
-    return InlineKeyboardButton(lbl, callback_data="do:menu")
+        logging.getLogger(__name__).error(f"menu_cb {action}: {e}", exc_info=True)
