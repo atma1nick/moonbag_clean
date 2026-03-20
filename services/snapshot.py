@@ -1,9 +1,5 @@
 """
-Portfolio Snapshot — генерация PnL картинки для шаринга в Twitter/X.
-Использует Pillow. Стиль: тёмный терминал, зелёные цифры.
-
-Вызов: image_bytes = await generate_snapshot(user_id)
-Затем: await bot.send_photo(chat_id, image_bytes)
+Portfolio Snapshot — PnL картинка для шаринга.
 """
 import io
 import logging
@@ -12,20 +8,19 @@ from sqlalchemy import select
 from database import async_session
 from models import Position, JournalEntry
 from services.price import fetch_price, get_cached_sol_price
-from utils import fmt_sol, fmt_usd, fmt_x, fmt_mcap, fmt_pct
+from utils import fmt_sol, fmt_usd, fmt_x, fmt_mcap, fmt_pct, calc_pnl
 
 log = logging.getLogger(__name__)
 
 
 async def generate_snapshot(user_id: int) -> bytes | None:
-    """Генерирует PNG картинку с PnL. Возвращает bytes или None."""
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
-        log.error("Pillow not installed. Run: pip install Pillow")
+        log.error("Pillow not installed")
         return None
 
-    # ── Собираем данные ───────────────────────────────────────────────────
+    # ── Данные ────────────────────────────────────────────────────────────────
     async with async_session() as s:
         positions = (await s.execute(
             select(Position).where(
@@ -41,112 +36,126 @@ async def generate_snapshot(user_id: int) -> bytes | None:
     sol_price = get_cached_sol_price() or 0
 
     # Live PnL по открытым позициям
+    live_positions = []
     live_pnl = 0.0
-    live_data = []
     for pos in positions:
         data = await fetch_price(pos.contract)
-        if data and pos.entry_price:
-            cur_x   = data["price"] / pos.entry_price
-            pnl_sol = pos.sol_in * (cur_x - 1)
-            live_pnl += pnl_sol
-            live_data.append({
+        if data and pos.entry_price and data.get("price"):
+            cur_x            = data["price"] / pos.entry_price
+            pnl_sol, pnl_pct = calc_pnl(pos.sol_in, cur_x)
+            live_pnl        += pnl_sol
+            live_positions.append({
                 "symbol": pos.symbol,
-                "x":      cur_x,
-                "pnl":    pnl_sol,
+                "x":      round(cur_x,  2),
+                "pnl":    round(pnl_sol, 3),
+                "pct":    round(pnl_pct, 1),
             })
 
-    # Статистика из журнала
-    total_trades = len(journal)
+    # Журнал статистика
+    closed_pnl   = sum(j.pnl_sol for j in journal)
+    total_pnl    = closed_pnl + live_pnl
+    total_trades = len(journal) + len(positions)
     wins         = sum(1 for j in journal if j.pnl_sol >= 0)
-    total_pnl    = sum(j.pnl_sol for j in journal) + live_pnl
+    wins        += sum(1 for p in live_positions if p["pnl"] >= 0)
     winrate      = (wins / total_trades * 100) if total_trades else 0
-    best_x       = max((j.exit_x for j in journal), default=0)
+    best_x       = max(
+        [j.exit_x for j in journal] + [p["x"] for p in live_positions],
+        default=0
+    )
 
-    # ── Рисуем картинку ───────────────────────────────────────────────────
-    W, H    = 800, 480
-    BG      = (7,  10, 16)
-    GREEN   = (0,  232, 122)
-    RED     = (255, 53, 83)
-    CYAN    = (0,  207, 255)
-    WHITE   = (220, 235, 245)
-    MUTED   = (62,  84, 112)
-    SURFACE = (17,  23, 32)
+    # ── Рисуем ───────────────────────────────────────────────────────────────
+    W, H   = 800, 460
+    BG     = (7,  10, 16)
+    GREEN  = (0,  232, 122)
+    RED    = (255, 53, 83)
+    CYAN   = (0,  207, 255)
+    WHITE  = (220, 235, 245)
+    MUTED  = (62,  84, 112)
+    DARK   = (17,  23, 32)
+    PURPLE = (153, 69, 255)
 
     img  = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(img)
 
-    # Фоновая сетка
+    # Сетка
     for x in range(0, W, 40):
-        draw.line([(x, 0), (x, H)], fill=(20, 28, 40), width=1)
+        draw.line([(x, 0), (x, H)], fill=(15, 22, 35), width=1)
     for y in range(0, H, 40):
-        draw.line([(0, y), (W, y)], fill=(20, 28, 40), width=1)
+        draw.line([(0, y), (W, y)], fill=(15, 22, 35), width=1)
 
-    # Верхняя полоса
-    draw.rectangle([(0, 0), (W, 4)], fill=GREEN)
+    # Верхняя полоса градиент
+    for i in range(4):
+        r = int(PURPLE[0] + (CYAN[0] - PURPLE[0]) * i / 3)
+        g = int(PURPLE[1] + (CYAN[1] - PURPLE[1]) * i / 3)
+        b = int(PURPLE[2] + (CYAN[2] - PURPLE[2]) * i / 3)
+        draw.line([(0, i), (W, i)], fill=(r, g, b))
 
-    # Шрифты (системный fallback)
+    # Шрифты
     try:
-        font_big   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
-        font_med   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-        font_sm    = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",     18)
-        font_tiny  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",     14)
-        font_mono  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 16)
+        font_xl   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 56)
+        font_lg   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+        font_md   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+        font_sm   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",     16)
+        font_xs   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",     13)
+        font_mono = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 15)
     except Exception:
-        font_big  = ImageFont.load_default()
-        font_med  = font_sm = font_tiny = font_mono = font_big
+        font_xl = font_lg = font_md = font_sm = font_xs = font_mono = ImageFont.load_default()
 
     # Лого
-    draw.text((32, 20), "🌙 MoonBag", font=font_med, fill=WHITE)
-    draw.text((32, 52), "Portfolio Snapshot", font=font_sm, fill=MUTED)
+    draw.text((28, 18), "🌙", font=font_lg, fill=WHITE)
+    draw.text((60, 18), "MoonBag", font=font_lg, fill=WHITE)
+    draw.text((60, 48), "Portfolio Snapshot", font=font_xs, fill=MUTED)
 
     # Дата
     date_str = datetime.utcnow().strftime("%d %b %Y  %H:%M UTC")
-    draw.text((W - 220, 30), date_str, font=font_tiny, fill=MUTED)
+    bbox = draw.textbbox((0, 0), date_str, font=font_xs)
+    draw.text((W - bbox[2] - 28, 28), date_str, font=font_xs, fill=MUTED)
 
     # Главный PnL
     pnl_color = GREEN if total_pnl >= 0 else RED
     sign      = "+" if total_pnl >= 0 else ""
-    pnl_sol_str = f"{sign}{total_pnl:.3f} SOL"
-    pnl_usd_str = f"≈ {sign}${total_pnl * sol_price:,.0f}" if sol_price else ""
+    pnl_str   = f"{sign}{total_pnl:.3f} SOL"
+    draw.text((28, 85), pnl_str, font=font_xl, fill=pnl_color)
 
-    draw.text((32, 100), pnl_sol_str, font=font_big, fill=pnl_color)
-    draw.text((32, 158), pnl_usd_str, font=font_med, fill=pnl_color)
+    if sol_price:
+        usd_str = f"≈ {sign}${abs(total_pnl * sol_price):,.0f}"
+        draw.text((28, 148), usd_str, font=font_lg, fill=pnl_color)
 
     # Разделитель
-    draw.rectangle([(32, 200), (W - 32, 202)], fill=SURFACE)
+    draw.rectangle([(28, 188), (W - 28, 189)], fill=DARK)
 
-    # Статы (три колонки)
+    # Стат карточки
     stats = [
-        ("WINRATE",  f"{winrate:.0f}%",      GREEN if winrate >= 50 else RED),
-        ("TRADES",   str(total_trades),       CYAN),
-        ("BEST EXIT", fmt_x(best_x),          GREEN if best_x > 1 else MUTED),
+        ("WINRATE", f"{winrate:.0f}%",   GREEN if winrate >= 50 else RED),
+        ("TRADES",  str(total_trades),    CYAN),
+        ("BEST X",  fmt_x(best_x),        GREEN if best_x > 1 else MUTED),
+        ("OPEN",    str(len(positions)),   WHITE),
     ]
-    col_w = (W - 64) // 3
-    for i, (label, value, color) in enumerate(stats):
-        x = 32 + i * col_w
-        draw.text((x, 215), label, font=font_tiny, fill=MUTED)
-        draw.text((x, 235), value, font=font_med,  fill=color)
+    card_w = (W - 56) // 4
+    for i, (label, val, col) in enumerate(stats):
+        x = 28 + i * card_w
+        draw.rectangle([(x+2, 196), (x + card_w - 4, 256)], fill=DARK)
+        draw.text((x + 10, 202), label, font=font_xs, fill=MUTED)
+        draw.text((x + 10, 222), val,   font=font_md, fill=col)
 
     # Открытые позиции
-    draw.text((32, 290), "OPEN POSITIONS", font=font_tiny, fill=MUTED)
-    y_pos = 312
-    for item in sorted(live_data, key=lambda x: x["x"], reverse=True)[:4]:
-        color  = GREEN if item["pnl"] >= 0 else RED
-        sign_p = "+" if item["pnl"] >= 0 else ""
-        txt    = f"${item['symbol']:<8}  {fmt_x(item['x']):<8}  {sign_p}{fmt_sol(item['pnl'], 3)}"
-        draw.text((32, y_pos), txt, font=font_mono, fill=color)
-        y_pos += 24
-        if y_pos > H - 60:
-            break
+    if live_positions:
+        draw.text((28, 268), "OPEN POSITIONS", font=font_xs, fill=MUTED)
+        y = 288
+        for p in sorted(live_positions, key=lambda x: x["x"], reverse=True)[:5]:
+            col   = GREEN if p["pnl"] >= 0 else RED
+            sign_p = "+" if p["pnl"] >= 0 else ""
+            row   = f"${p['symbol']:<10} {p['x']:.2f}x    {sign_p}{p['pnl']:.3f} SOL   ({sign_p}{p['pct']:.1f}%)"
+            draw.text((28, y), row, font=font_mono, fill=col)
+            y += 22
+            if y > H - 50:
+                break
 
-    # Watermark
-    draw.text((32, H - 28), "t.me/MoonBagBot", font=font_tiny, fill=MUTED)
-    draw.text((W - 180, H - 28), "moonbag.app", font=font_tiny, fill=MUTED)
+    # Нижняя полоса и watermark
+    draw.rectangle([(0, H - 3), (W, H)], fill=CYAN)
+    draw.text((28, H - 22), "@MoonBagBot", font=font_xs, fill=MUTED)
 
-    # Нижняя полоса
-    draw.rectangle([(0, H - 4), (W, H)], fill=CYAN)
-
-    # Конвертируем в bytes
+    # Сохраняем
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     buf.seek(0)

@@ -53,9 +53,63 @@ async def show_positions(msg: Message, uid: int):
         )
         return
 
+    sol_price = get_cached_sol_price()
+    lines     = []
+    total_pnl = 0.0
+
     for pos in positions:
-        card = await _pos_card(pos, currency)
-        await msg.reply_text(**card)
+        data  = await fetch_price(pos.contract)
+        cur_x = pnl_sol = pnl_pct = 0.0
+        mcap_str = "?"
+
+        if data and data.get("price") and pos.entry_price:
+            cur_x            = data["price"] / pos.entry_price
+            pnl_sol, pnl_pct = calc_pnl(pos.sol_in, cur_x)
+            mcap_str         = fmt_mcap(data["mcap"])
+            total_pnl       += pnl_sol
+
+        sign  = "+" if pnl_sol >= 0 else ""
+        emoji = "🟢" if cur_x >= 1 else "🔴"
+        plan  = json.loads(pos.exit_plan) if pos.exit_plan else []
+        next_tp = next((l for l in plan if not l.get("done") and not l.get("skipped") and l.get("x")), None)
+        tp_str  = f"\n  📌 Next TP: {next_tp['label']} → sell {next_tp['pct']}%" if next_tp else ""
+        sl_str  = f"  🛑 SL: {fmt_mcap(pos.stop_loss)}" if pos.stop_loss else ""
+
+        lines.append(
+            f"{emoji} *${pos.symbol}*  {fmt_x(cur_x)}"
+            f"  *{sign}{fmt_sol(pnl_sol, 3)}* ({sign}{fmt_pct(pnl_pct)})\n"
+            f"  In: {fmt_sol(pos.sol_in, 2)}  Mcap: {mcap_str}"
+            f"  {sl_str}{tp_str}"
+        )
+
+    sign_t    = "+" if total_pnl >= 0 else ""
+    usd_total = f" (≈${total_pnl * sol_price:.0f})" if sol_price else ""
+    header    = (
+        f"📊 *Positions* ({len(positions)}) · "
+        f"PnL: *{sign_t}{fmt_sol(total_pnl, 3)}*{usd_total}\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
+    )
+
+    # Кнопки управления — по строке на каждую позицию
+    buttons = []
+    for pos in positions[:6]:
+        buttons.append([
+            InlineKeyboardButton(f"${pos.symbol} ✎ Plan", callback_data=f"editplan:{pos.id}"),
+            InlineKeyboardButton("💸 Sell",                callback_data=f"closepos:{pos.id}"),
+            InlineKeyboardButton("🛑",                     callback_data=f"setsl:{pos.id}"),
+        ])
+    buttons.append([
+        InlineKeyboardButton("➕ Add", callback_data="do:add"),
+        InlineKeyboardButton("📸 Snap", callback_data="snapshot:refresh"),
+        InlineKeyboardButton("◀️ Menu", callback_data="do:menu"),
+    ])
+
+    await msg.reply_text(
+        header + "\n\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        disable_web_page_preview=True
+    )
 
 
 async def _pos_card(pos: Position, currency: str = "SOL") -> dict:
@@ -393,12 +447,12 @@ async def editplan_got_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     await update.message.reply_text(
         f"✅ *Take-profits updated!*\n\n{exit_plan_text(plan)}\n\n"
-        f"_Fired levels reset._",
+        f"_Fired levels reset. Tracking from scratch._",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📊 Positions", callback_data="do:pos"),
-            InlineKeyboardButton("◀️ Menu",      callback_data="do:menu"),
-        ]])
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 My Positions", callback_data="do:pos")],
+            [InlineKeyboardButton("◀️ Menu",         callback_data="do:menu")],
+        ])
     )
     return ConversationHandler.END
 
