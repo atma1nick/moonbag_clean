@@ -130,6 +130,10 @@ async def menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             from handlers.settings import show_settings
             await show_settings(q.message, uid)
 
+        elif action == "snapshot":
+            from handlers.snapshot import cmd_snapshot
+            await cmd_snapshot.__wrapped__(q, ctx) if hasattr(cmd_snapshot, '__wrapped__') else await q.message.reply_text('Use /snapshot')
+
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"menu_cb {action}: {e}", exc_info=True)

@@ -60,7 +60,8 @@ async def show_journal(msg: Message, uid: int):
 
     await msg.reply_text(
         text, parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("◀️ Menu", callback_data="do:menu")
-        ]])
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📸 Snapshot",  callback_data="do:snapshot"),
+             InlineKeyboardButton("◀️ Menu",      callback_data="do:menu")],
+        ])
     )

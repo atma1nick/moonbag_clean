@@ -25,9 +25,12 @@ from handlers.settings     import settings_cb, settings_input
 from handlers.admin        import cmd_admin, cmd_grant_pro, cmd_broadcast
 from handlers.autoplan     import (cmd_autoplan, autoplan_cb,
                                    autoplan_got_text, ST_AUTOPLAN)
+from handlers.snapshot     import cmd_snapshot, snapshot_cb
 
 import loops.price_loop  as price_loop
 import loops.wallet_loop as wallet_loop
+import loops.helius_ws   as helius_ws
+import loops.dune_loop   as dune_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -137,6 +140,40 @@ async def cmd_help(update, ctx):
     )
 
 
+
+# ── Dune discovery callbacks ──────────────────────────────────────────────────
+
+async def dune_add_cb(update, ctx):
+    """Юзер нажал ➕ добавить кошелёк из Dune discovery."""
+    q       = update.callback_query
+    await q.answer()
+    address = q.data.split(":")[1]
+    uid     = q.from_user.id
+
+    from models import SmartWallet
+    async with __import__("database").async_session() as s:
+        try:
+            s.add(SmartWallet(user_id=uid, address=address, label="🔍 Dune"))
+            await s.commit()
+            await q.answer(f"✅ Added: {address[:8]}...", show_alert=True)
+        except Exception:
+            await q.answer("Already in your list", show_alert=True)
+
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+async def dune_skip_cb(update, ctx):
+    q = update.callback_query
+    await q.answer("Skipped")
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
 # ── Universal text router ─────────────────────────────────────────────────────
 
 async def universal_text(update, ctx):
@@ -218,6 +255,7 @@ def main():
     app.add_handler(CommandHandler("help",      cmd_help))
     app.add_handler(CommandHandler("cancel",    cmd_cancel))
     app.add_handler(CommandHandler("autoplan",  cmd_autoplan))
+    app.add_handler(CommandHandler("snapshot",  cmd_snapshot))
     app.add_handler(CommandHandler("admin",     cmd_admin))
     app.add_handler(CommandHandler("grant_pro", cmd_grant_pro))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
@@ -239,6 +277,9 @@ def main():
     app.add_handler(CallbackQueryHandler(sw_cb,         pattern=r"^sw:"))
     app.add_handler(CallbackQueryHandler(kol_cb,        pattern=r"^kol:"))
     app.add_handler(CallbackQueryHandler(settings_cb,   pattern=r"^cfg:"))
+    app.add_handler(CallbackQueryHandler(snapshot_cb,   pattern=r"^snapshot:"))
+    app.add_handler(CallbackQueryHandler(dune_add_cb,   pattern=r"^dune_add:"))
+    app.add_handler(CallbackQueryHandler(dune_skip_cb,  pattern=r"^dune_skip:"))
 
     # Free text fallback
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text))
@@ -248,6 +289,8 @@ def main():
         log.info("✅ DB initialized")
         asyncio.create_task(price_loop.run(app.bot))
         asyncio.create_task(wallet_loop.run(app.bot))
+        asyncio.create_task(helius_ws.run(app.bot))
+        asyncio.create_task(dune_loop.run(app.bot))
         log.info("✅ Loops started")
 
     app.post_init = on_startup
