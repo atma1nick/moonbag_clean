@@ -29,6 +29,7 @@ from handlers.admin        import cmd_admin, cmd_grant_pro, cmd_broadcast
 from handlers.autoplan     import (cmd_autoplan, autoplan_cb,
                                    autoplan_got_text, ST_AUTOPLAN)
 from handlers.snapshot     import cmd_snapshot, snapshot_cb
+from handlers.rugcheck     import cmd_rugcheck
 
 import loops.price_loop  as price_loop
 import loops.wallet_loop as wallet_loop

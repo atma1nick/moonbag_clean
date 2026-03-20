@@ -230,6 +230,33 @@ async def start_add_position(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ST_CONTRACT
 
 
+
+async def _bg_rugcheck(chat_id: int, contract: str, symbol: str, bot):
+    """Фоновая проверка RugCheck — отправляет результат отдельным сообщением."""
+    try:
+        from services.rugcheck import check_token, format_rugcheck
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        result = await check_token(contract)
+        if not result:
+            return
+        # Показываем только если есть реальные риски
+        if result["score"] >= 85 and not result["mint_auth"] and not result["freeze_auth"]:
+            return  # Токен чистый — не засоряем чат
+        text = format_rugcheck(result, symbol)
+        await bot.send_message(
+            chat_id,
+            text,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🌐 Full report", url=result["link"]),
+            ]])
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug(f"bg_rugcheck: {e}")
+
+
 async def add_got_contract(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ca = update.message.text.strip()
     if len(ca) < 32 or len(ca) > 44 or " " in ca:
@@ -257,6 +284,10 @@ async def add_got_contract(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "add_cur_price": data["price"],
         "add_cur_mcap":  data["mcap"],
     })
+
+    # Фоновая проверка безопасности токена
+    import asyncio
+    asyncio.create_task(_bg_rugcheck(msg.chat.id, ca, data["symbol"], msg.get_bot()))
 
     await msg.edit_text(
         f"✅ *{data['name']}* (${data['symbol']})\n"
