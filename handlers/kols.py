@@ -109,3 +109,5 @@ async def kol_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("◀️ Menu",        callback_data="do:menu")],
         ])
     )
+    # Показываем список КОЛов сразу после добавления
+    await show_kols(update.message, update.effective_user.id)

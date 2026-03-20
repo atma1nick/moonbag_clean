@@ -177,12 +177,15 @@ async def settings_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await s.commit()
         ctx.user_data.pop("cfg_whale", None)
         await update.message.reply_text(
-            f"✅ Whale threshold: ≥{val:.0f} SOL",
+            f"✅ Whale threshold set: ≥{val:.0f} SOL",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⚙️ Settings", callback_data="do:settings"),
                 InlineKeyboardButton("◀️ Menu",     callback_data="do:menu"),
             ]])
         )
+        # Автоматически показываем settings
+        await show_settings(update.message, uid)
 
     # ── Wallet ────────────────────────────────────────────────────────────
     elif ctx.user_data.get("cfg_wallet"):

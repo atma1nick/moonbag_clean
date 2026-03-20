@@ -9,7 +9,7 @@ from sqlalchemy import select
 from database import async_session
 from models import Position, JournalEntry
 from services.price import fetch_price, get_cached_sol_price
-from utils import (fmt_mcap, fmt_sol, fmt_pct, fmt_x, fmt_pnl,
+from utils import (fmt_mcap, fmt_sol, fmt_usd, fmt_pct, fmt_x, fmt_pnl,
                    parse_mcap, parse_exit_plan, exit_plan_text,
                    calc_pnl, dexscreener)
 from handlers.base import get_user
@@ -82,8 +82,8 @@ async def _pos_card(pos: Position, currency: str = "SOL") -> dict:
     def ch(v):
         return ("🟢 +" if v >= 0 else "🔴 ") + f"{v:.1f}%"
 
-    # Exit plan с фактической стоимостью на каждом уровне
-    plan      = json.loads(pos.exit_plan) if pos.exit_plan else []
+    # Exit plan: mcap цели + стоимость тейка в SOL или USD
+    plan       = json.loads(pos.exit_plan) if pos.exit_plan else []
     plan_lines = ""
     if plan:
         lines = []
@@ -94,24 +94,29 @@ async def _pos_card(pos: Position, currency: str = "SOL") -> dict:
             skipped  = l.get("skipped", False)
             lbl      = l.get("label", f"{x_target}x") if x_target else "🌙 Moon"
 
-            # Фактическая стоимость = SOL_in * x_target * pct%
             if x_target and pos.sol_in:
-                sol_at_target = pos.sol_in * (pct / 100) * x_target
-                val_str = f"≈{fmt_sol(sol_at_target, 2)}"
+                sol_value = pos.sol_in * (pct / 100) * x_target
+                if currency == "USD" and sol_price:
+                    val_str = fmt_usd(sol_value * sol_price)
+                else:
+                    val_str = fmt_sol(sol_value, 2)
+                # Mcap на уровне тейка
+                mcap_hint = (f" @ {fmt_mcap(pos.entry_mcap * x_target)}"
+                             if pos.entry_mcap else "")
             else:
-                val_str = f"{pct}% held"
+                val_str   = f"{pct}% held"
+                mcap_hint = ""
 
             if done:
                 status = "✅"
             elif skipped:
                 status = "⏭"
             else:
-                # прогресс к уровню
                 progress = min(100, int((cur_x / x_target) * 100)) if x_target and cur_x else 0
                 bar      = "█" * (progress // 20) + "░" * (5 - progress // 20)
-                status   = f"[{bar}] {progress}%"
+                status   = f"[{bar}]{progress}%"
 
-            lines.append(f"  {status} *{lbl}* — sell {pct}% → {val_str}")
+            lines.append(f"  {status} *{lbl}*{mcap_hint} — {pct}% → ≈{val_str}")
 
         plan_lines = "\n\n📋 *Exit Plan:*\n" + "\n".join(lines)
 

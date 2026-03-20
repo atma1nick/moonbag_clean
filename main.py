@@ -139,11 +139,14 @@ async def cmd_help(update, ctx):
 
 async def universal_text(update, ctx):
     if ctx.user_data.get("sw_adding"):
-        return await sw_input(update, ctx)
+        await sw_input(update, ctx)
+        return
     if ctx.user_data.get("kol_adding"):
-        return await kol_input(update, ctx)
+        await kol_input(update, ctx)
+        return
     if ctx.user_data.get("cfg_whale") or ctx.user_data.get("cfg_wallet"):
-        return await settings_input(update, ctx)
+        await settings_input(update, ctx)
+        return
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
