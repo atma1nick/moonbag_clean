@@ -19,8 +19,8 @@ from handlers.positions    import (
     ST_CONTRACT, ST_ENTRY, ST_SOL, ST_PLAN, ST_NOTE,
     ST_EDIT_PLAN, ST_SET_SL, ST_CLOSE_PCT,
 )
-from handlers.smartwallets import sw_cb, sw_input
-from handlers.kols         import kol_cb, kol_input
+from handlers.smartwallets import sw_cb, sw_add_start, sw_got_address, sw_cancel, ST_SW_ADD
+from handlers.kols         import kol_cb, kol_add_start, kol_got_handle, kol_cancel, ST_KOL_ADD
 from handlers.settings     import settings_cb, settings_input
 from handlers.admin        import cmd_admin, cmd_grant_pro, cmd_broadcast
 from handlers.autoplan     import (cmd_autoplan, autoplan_cb,
@@ -177,12 +177,6 @@ async def dune_skip_cb(update, ctx):
 # ── Universal text router ─────────────────────────────────────────────────────
 
 async def universal_text(update, ctx):
-    if ctx.user_data.get("sw_adding"):
-        await sw_input(update, ctx)
-        return
-    if ctx.user_data.get("kol_adding"):
-        await kol_input(update, ctx)
-        return
     if ctx.user_data.get("cfg_whale") or ctx.user_data.get("cfg_wallet"):
         await settings_input(update, ctx)
         return
@@ -242,6 +236,20 @@ def main():
         allow_reentry=True,
     )
 
+    sw_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(sw_add_start, pattern=r"^sw:add$")],
+        states={ST_SW_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, sw_got_address)]},
+        fallbacks=[CommandHandler("cancel", sw_cancel)],
+        allow_reentry=True,
+    )
+
+    kol_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(kol_add_start, pattern=r"^kol:add$")],
+        states={ST_KOL_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, kol_got_handle)]},
+        fallbacks=[CommandHandler("cancel", kol_cancel)],
+        allow_reentry=True,
+    )
+
     autoplan_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(autoplan_cb, pattern=r"^ap:")],
         states={ST_AUTOPLAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, autoplan_got_text)]},
@@ -261,6 +269,8 @@ def main():
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
 
     # Conversations — BEFORE generic callbacks
+    app.add_handler(sw_conv)
+    app.add_handler(kol_conv)
     app.add_handler(autoplan_conv)
     app.add_handler(add_conv)
     app.add_handler(quickadd_conv)

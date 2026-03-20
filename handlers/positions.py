@@ -327,11 +327,15 @@ async def add_got_note(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     ctx.user_data.clear()
 
-    # Показываем итог и кнопки навигации
+    name   = d.get("add_name",   "Token")
+    symbol = d.get("add_symbol", "???")
+    sol    = d.get("add_sol",    0.0)
+    mcap   = d.get("add_mcap",   0.0)
+
     await update.message.reply_text(
         f"✅ *Position added!*\n\n"
-        f"*{d['add_name']}* (${d['add_symbol']})\n"
-        f"💰 {fmt_sol(d['add_sol'])} in  |  Entry: {fmt_mcap(d['add_mcap'])}\n\n"
+        f"*{name}* (${symbol})\n"
+        f"💰 {fmt_sol(sol)} in  |  Entry: {fmt_mcap(mcap)}\n\n"
         f"*Exit plan:*\n{exit_plan_text(plan)}\n\n"
         f"🎯 I'll alert you when targets are hit!",
         parse_mode="Markdown",
