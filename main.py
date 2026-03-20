@@ -19,7 +19,7 @@ from handlers.positions    import (
     ST_CONTRACT, ST_ENTRY, ST_SOL, ST_PLAN, ST_NOTE,
     ST_EDIT_PLAN, ST_SET_SL, ST_CLOSE_PCT,
 )
-from handlers.smartwallets import sw_cb, sw_add_start, sw_got_address, sw_cancel, ST_SW_ADD
+from handlers.smartwallets import sw_cb, sw_add_start, sw_got_address, sw_cancel, ST_SW_ADD, cmd_wallets
 from handlers.kols         import kol_cb, kol_add_start, kol_got_handle, kol_cancel, ST_KOL_ADD
 from handlers.settings     import (settings_cb, show_settings,
                                    wallet_start, wallet_got_address,
@@ -33,7 +33,7 @@ from handlers.snapshot     import cmd_snapshot, snapshot_cb
 import loops.price_loop  as price_loop
 import loops.wallet_loop as wallet_loop
 import loops.helius_ws   as helius_ws
-import loops.dune_loop   as dune_loop
+import loops.discovery_loop as discovery_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,12 +45,17 @@ log = logging.getLogger(__name__)
 # ── keepplan ──────────────────────────────────────────────────────────────────
 
 async def keepplan_cb(update, ctx):
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
     q = update.callback_query
     await q.answer("✅ Plan confirmed!")
     try:
         await q.edit_message_text(
             q.message.text + "\n\n✅ _Tracking with default plan._",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📊 Positions", callback_data="do:pos"),
+                InlineKeyboardButton("◀️ Menu",      callback_data="do:menu"),
+            ]])
         )
     except Exception:
         pass
@@ -118,6 +123,28 @@ async def cmd_help(update, ctx):
 
 
 
+# ── pos_detail — полная карточка позиции ─────────────────────────────────────
+
+async def pos_detail_cb(update, ctx):
+    q      = update.callback_query
+    await q.answer()
+    pos_id = int(q.data.split(":")[1])
+    uid    = q.from_user.id
+    from handlers.positions import _pos_card
+    from handlers.base import get_user
+    from models import Position
+    from database import async_session
+    user = await get_user(uid)
+    currency = user.currency if user else "SOL"
+    async with async_session() as s:
+        pos = await s.get(Position, pos_id)
+    if not pos or pos.user_id != uid:
+        await q.answer("Position not found", show_alert=True)
+        return
+    card = await _pos_card(pos, currency)
+    await q.message.reply_text(**card)
+
+
 # ── Dune discovery callbacks ──────────────────────────────────────────────────
 
 async def dune_add_cb(update, ctx):
@@ -145,6 +172,15 @@ async def dune_add_cb(update, ctx):
 async def dune_skip_cb(update, ctx):
     q = update.callback_query
     await q.answer("Skipped")
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+async def disc_keep_cb(update, ctx):
+    q = update.callback_query
+    await q.answer("Keeping all wallets")
     try:
         await q.edit_message_reply_markup(reply_markup=None)
     except Exception:
@@ -289,8 +325,10 @@ def main():
     app.add_handler(CallbackQueryHandler(kol_cb,        pattern=r"^kol:"))
     app.add_handler(CallbackQueryHandler(settings_cb,   pattern=r"^cfg:"))
     app.add_handler(CallbackQueryHandler(snapshot_cb,   pattern=r"^snapshot:"))
+    app.add_handler(CallbackQueryHandler(pos_detail_cb, pattern=r"^pos_detail:"))
     app.add_handler(CallbackQueryHandler(dune_add_cb,   pattern=r"^dune_add:"))
     app.add_handler(CallbackQueryHandler(dune_skip_cb,  pattern=r"^dune_skip:"))
+    app.add_handler(CallbackQueryHandler(disc_keep_cb,  pattern=r"^disc:"))
 
     # Free text fallback
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text))
@@ -301,7 +339,7 @@ def main():
         asyncio.create_task(price_loop.run(app.bot))
         asyncio.create_task(wallet_loop.run(app.bot))
         asyncio.create_task(helius_ws.run(app.bot))
-        asyncio.create_task(dune_loop.run(app.bot))
+        asyncio.create_task(discovery_loop.run(app.bot))
         log.info("✅ Loops started")
 
     app.post_init = on_startup

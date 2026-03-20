@@ -163,3 +163,54 @@ async def sw_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ]])
     )
     return ConversationHandler.END
+
+
+async def cmd_wallets(update, ctx):
+    """
+    /wallets — показать статус всех smart wallets с winrate и активностью.
+    """
+    from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+    from services.wallet_discovery import score_tracked_wallets
+    uid = update.effective_user.id
+
+    msg = await update.message.reply_text("🔍 Analyzing wallets...")
+
+    scores = await score_tracked_wallets(uid)
+
+    if not scores:
+        await msg.edit_text(
+            "🧠 *Smart Wallets*\n\nNo wallets added yet.\n\nUse 🧠 Smart Wallets in the menu to add.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🧠 Smart Wallets", callback_data="do:smartwallets"),
+            ]])
+        )
+        return
+
+    lines = []
+    for w in scores:
+        addr  = w["address"]
+        label = w.get("label") or f"{addr[:8]}..."
+        wr    = w.get("winrate", 0)
+        trades= w.get("trades", 0)
+        status= w.get("status", "")
+
+        status_icon = "✅" if status == "active" else ("💤" if status == "inactive" else "❓")
+        wr_str = f"{wr:.0f}% WR" if wr > 0 else "no data"
+        lines.append(f"{status_icon} *{label}* — {wr_str} · {trades} txs")
+
+    text = (
+        f"🧠 *Smart Wallets* ({len(scores)})\n\n"
+        + "\n".join(lines)
+        + "\n\n_✅ Active  💤 Silent 30d+_"
+    )
+
+    await msg.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add Wallet", callback_data="sw:add"),
+             InlineKeyboardButton("🗑 Remove",     callback_data="sw:list_remove")],
+            [InlineKeyboardButton("◀️ Menu",       callback_data="do:menu")],
+        ])
+    )
