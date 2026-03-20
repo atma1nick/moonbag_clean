@@ -21,7 +21,10 @@ from handlers.positions    import (
 )
 from handlers.smartwallets import sw_cb, sw_add_start, sw_got_address, sw_cancel, ST_SW_ADD
 from handlers.kols         import kol_cb, kol_add_start, kol_got_handle, kol_cancel, ST_KOL_ADD
-from handlers.settings     import settings_cb, settings_input
+from handlers.settings     import (settings_cb, show_settings,
+                                   wallet_start, wallet_got_address,
+                                   whale_start, whale_got_value,
+                                   settings_cancel, ST_WALLET, ST_WHALE)
 from handlers.admin        import cmd_admin, cmd_grant_pro, cmd_broadcast
 from handlers.autoplan     import (cmd_autoplan, autoplan_cb,
                                    autoplan_got_text, ST_AUTOPLAN)
@@ -151,9 +154,7 @@ async def dune_skip_cb(update, ctx):
 # ── Universal text router ─────────────────────────────────────────────────────
 
 async def universal_text(update, ctx):
-    if ctx.user_data.get("cfg_whale") or ctx.user_data.get("cfg_wallet"):
-        await settings_input(update, ctx)
-        return
+    pass  # all inputs handled by ConversationHandlers
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -231,6 +232,22 @@ def main():
         conversation_timeout=300,
     )
 
+    wallet_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(wallet_start, pattern=r"^cfg:wallet$")],
+        states={ST_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, wallet_got_address)]},
+        fallbacks=[CommandHandler("cancel", settings_cancel)],
+        allow_reentry=True,
+        conversation_timeout=300,
+    )
+
+    whale_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(whale_start, pattern=r"^cfg:whale$")],
+        states={ST_WHALE: [MessageHandler(filters.TEXT & ~filters.COMMAND, whale_got_value)]},
+        fallbacks=[CommandHandler("cancel", settings_cancel)],
+        allow_reentry=True,
+        conversation_timeout=300,
+    )
+
     autoplan_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(autoplan_cb, pattern=r"^ap:")],
         states={ST_AUTOPLAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, autoplan_got_text)]},
@@ -251,6 +268,8 @@ def main():
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
 
     # Conversations — BEFORE generic callbacks
+    app.add_handler(wallet_conv)
+    app.add_handler(whale_conv)
     app.add_handler(sw_conv)
     app.add_handler(kol_conv)
     app.add_handler(autoplan_conv)

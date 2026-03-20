@@ -20,7 +20,10 @@ from models import User, SmartWallet
 log = logging.getLogger(__name__)
 
 HELIUS_KEY    = os.getenv("HELIUS_KEY", "")
-WS_URL        = f"wss://atlas-mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
+# Helius WebSocket — два возможных эндпоинта
+# atlas-mainnet (Enhanced) требует платный план
+# Используем стандартный который работает на free tier
+WS_URL        = f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
 SOL_MINT      = "So11111111111111111111111111111111111111112"
 RECONNECT_SEC = 5
 MAX_RECONNECTS= 999
