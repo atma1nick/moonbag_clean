@@ -34,14 +34,17 @@ async def show_kols(msg: Message, uid: int):
 async def kol_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q      = update.callback_query
     await q.answer()
-    action = q.data.split(":")[1]
+    parts  = q.data.split(":")
+    action = parts[1]
     uid    = q.from_user.id
 
     if action == "add":
         ctx.user_data["kol_adding"] = True
         await q.message.reply_text(
-            "🐦 *Add KOL*\n\nSend their Twitter handle (without @):\n\n"
-            "_Example:_ `ansemtrades`\n\n_(or /cancel)_",
+            "🐦 *Add KOL*\n\n"
+            "Send their Twitter handle (without @):\n\n"
+            "_Example:_ `ansemtrades`\n\n"
+            "_(or /cancel)_",
             parse_mode="Markdown"
         )
 
@@ -49,36 +52,46 @@ async def kol_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         async with async_session() as s:
             result = await s.execute(select(KOL).where(KOL.user_id == uid))
             kols   = result.scalars().all()
+
         if not kols:
             await q.answer("Nothing to remove", show_alert=True)
             return
-        buttons = [[InlineKeyboardButton(f"🗑 @{k.handle}", callback_data=f"kol:del:{k.id}")]
-                   for k in kols]
+
+        buttons = [
+            [InlineKeyboardButton(f"🗑 @{k.handle}", callback_data=f"kol:del:{k.id}")]
+            for k in kols
+        ]
         buttons.append([InlineKeyboardButton("◀️ Back", callback_data="do:kols")])
         await q.edit_message_text(
-            "🗑 *Remove KOL:*", parse_mode="Markdown",
+            "🗑 *Select KOL to remove:*",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
     elif action == "del":
-        kol_id = int(q.data.split(":")[2])
+        kol_id = int(parts[2])
         async with async_session() as s:
             k = await s.get(KOL, kol_id)
             if k and k.user_id == uid:
+                handle = k.handle
                 await s.delete(k)
                 await s.commit()
-                await q.answer(f"Removed @{k.handle}")
+                await q.answer(f"Removed @{handle}")
         await show_kols(q.message, uid)
 
 
 async def kol_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.user_data.get("kol_adding"):
         return
+
     handle = update.message.text.strip().lstrip("@").lower()
     uid    = update.effective_user.id
 
-    if not handle or " " in handle:
-        await update.message.reply_text("❌ Invalid handle. Send without @, no spaces.")
+    if not handle or " " in handle or len(handle) > 50:
+        await update.message.reply_text(
+            "❌ Invalid handle. Send without @, no spaces.\n_(or /cancel)_",
+            parse_mode="Markdown"
+        )
         return
 
     async with async_session() as s:
@@ -86,10 +99,13 @@ async def kol_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await s.commit()
 
     ctx.user_data.pop("kol_adding", None)
+
     await update.message.reply_text(
-        f"✅ Added: @{handle}\nI'll alert you when they mention a Solana token.",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🐦 KOL Monitor", callback_data="do:kols"),
-            InlineKeyboardButton("◀️ Menu",        callback_data="do:menu"),
-        ]])
+        f"✅ *KOL added:* @{handle}\n\n"
+        f"I'll alert you when they mention a Solana token.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🐦 KOL Monitor", callback_data="do:kols"),
+             InlineKeyboardButton("◀️ Menu",        callback_data="do:menu")],
+        ])
     )
