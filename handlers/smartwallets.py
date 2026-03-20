@@ -56,6 +56,8 @@ async def sw_add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def sw_got_address(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Получили адрес — сохраняем."""
+    import logging
+    logging.getLogger(__name__).info(f"sw_got_address called: {update.message.text[:20]}")
     parts   = update.message.text.strip().split(None, 1)
     address = parts[0]
     label   = parts[1].strip() if len(parts) > 1 else None

@@ -201,6 +201,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
         allow_reentry=True,
+        conversation_timeout=300,
     )
 
     # quickadd из bundle alert (начинается с ST_SOL)
@@ -213,6 +214,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
         allow_reentry=True,
+        conversation_timeout=300,
     )
 
     edit_plan_conv = ConversationHandler(
@@ -220,6 +222,7 @@ def main():
         states={ST_EDIT_PLAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, editplan_got_text)]},
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
         allow_reentry=True,
+        conversation_timeout=300,
     )
 
     set_sl_conv = ConversationHandler(
@@ -227,6 +230,7 @@ def main():
         states={ST_SET_SL: [MessageHandler(filters.TEXT & ~filters.COMMAND, setsl_got_text)]},
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
         allow_reentry=True,
+        conversation_timeout=300,
     )
 
     close_conv = ConversationHandler(
@@ -234,6 +238,7 @@ def main():
         states={ST_CLOSE_PCT: [MessageHandler(filters.TEXT & ~filters.COMMAND, close_got_pct)]},
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
         allow_reentry=True,
+        conversation_timeout=300,
     )
 
     sw_conv = ConversationHandler(
@@ -241,6 +246,7 @@ def main():
         states={ST_SW_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, sw_got_address)]},
         fallbacks=[CommandHandler("cancel", sw_cancel)],
         allow_reentry=True,
+        conversation_timeout=300,
     )
 
     kol_conv = ConversationHandler(
@@ -248,6 +254,7 @@ def main():
         states={ST_KOL_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, kol_got_handle)]},
         fallbacks=[CommandHandler("cancel", kol_cancel)],
         allow_reentry=True,
+        conversation_timeout=300,
     )
 
     autoplan_conv = ConversationHandler(
@@ -255,6 +262,7 @@ def main():
         states={ST_AUTOPLAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, autoplan_got_text)]},
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
         allow_reentry=True,
+        conversation_timeout=300,
     )
 
     # Commands
@@ -267,6 +275,10 @@ def main():
     app.add_handler(CommandHandler("admin",     cmd_admin))
     app.add_handler(CommandHandler("grant_pro", cmd_grant_pro))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+
+    # Global /cancel — registered BEFORE conversations so it always works
+    # Even if user is stuck in a conversation, /cancel from command list works
+    app.add_handler(CommandHandler("cancel", cmd_cancel), group=0)
 
     # Conversations — BEFORE generic callbacks
     app.add_handler(sw_conv)
